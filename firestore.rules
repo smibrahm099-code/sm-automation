@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+    // Accounts must have clicked the emailed verification link. (To turn this off, use: return signedIn(); and set REQUIRE_VERIFIED = false in src/auth.jsx)
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
+    function isAdmin() { return signedIn() && exists(/databases/$(db)/documents/admins/$(request.auth.uid)); }
+
+    match /users/{uid} {
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+      allow delete: if signedIn() && request.auth.uid == uid;
+      // the profile holds three short pieces of text and nothing else, so an account cannot park
+      // arbitrary data here; a field left out is fine, a field of the wrong type or size is not
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name','mobile','email'])
+        && (!('name' in request.resource.data) || (request.resource.data.name is string && request.resource.data.name.size() < 120))
+        && (!('mobile' in request.resource.data) || (request.resource.data.mobile is string && request.resource.data.mobile.size() < 30))
+        && (!('email' in request.resource.data) || (request.resource.data.email is string && request.resource.data.email.size() < 200));
+    }
+    match /enquiries/{id} {
+      // Every field is checked, not just the message: without this the other five accept anything up to
+      // Firestore's 1 MiB document limit, so one signed-in account could fill the database with junk.
+      allow create: if verified()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['uid','name','mobile','email','company','machineId','message','createdAt'])
+        && request.resource.data.message is string && request.resource.data.message.size() < 2000
+        && request.resource.data.name is string && request.resource.data.name.size() < 120
+        && request.resource.data.mobile is string && request.resource.data.mobile.size() < 30
+        && request.resource.data.email is string && request.resource.data.email.size() < 200
+        && request.resource.data.company is string && request.resource.data.company.size() < 160
+        && request.resource.data.machineId is string && request.resource.data.machineId.size() < 100;
+      allow read: if (verified() && resource.data.uid == request.auth.uid) || isAdmin();   // the admin needs no email verification
+      allow update: if false;
+      allow delete: if isAdmin();   // the admin can remove old enquiries
+    }
+    match /machines/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+    // FIRST ADMIN: /admin/setup creates the owner login with the setup code below (no email verification for the admin).
+    // The setup code is written in ONE place only (the line marked CODE). Change it before publishing if you want your own.
+    // After the first admin exists, meta/adminSetup is created and nobody else can ever claim admin.
+    match /admins/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.code == 'SM-Q338HG9Q3X6K'   // CODE
+        && !exists(/databases/$(db)/documents/meta/adminSetup);
+      allow update, delete: if false;
+    }
+    match /meta/adminSetup {
+      allow get: if true;   // lets /admin/setup know whether setup is still open; holds no secret
+      allow create: if signedIn() && exists(/databases/$(db)/documents/admins/$(request.auth.uid))
+        && !exists(/databases/$(db)/documents/meta/adminSetup);
+      allow update, delete: if false;
+    }
+  }
+}
